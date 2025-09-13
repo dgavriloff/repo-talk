@@ -9,7 +9,7 @@ from git import Repo
 from langchain_community.vectorstores import FAISS
 from langchain_community.document_loaders import TextLoader
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-from langchain.text_splitter import CharacterTextSplitter
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.chains import RetrievalQA
 
 # --- INITIAL SETUP ---
@@ -34,7 +34,8 @@ def init_db():
         name TEXT NOT NULL UNIQUE,
         github_url TEXT NOT NULL UNIQUE
     )
-    """)
+    """
+    )
     conn.commit()
     conn.close()
 
@@ -72,13 +73,23 @@ def index_repository(repo_url: str):
         return
 
     print("3/4: Chunking documents...")
-    text_splitter = CharacterTextSplitter(chunk_size=1500, chunk_overlap=150)
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1500, chunk_overlap=150)
     chunks = text_splitter.split_documents(documents)
 
     print("4/4: Creating and saving vector store via OpenAI API...")
     embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
-    vector_store = FAISS.from_documents(chunks, embeddings)
     
+    # Batch processing
+    batch_size = 500
+    vector_store = None
+    for i in range(0, len(chunks), batch_size):
+        batch = chunks[i:i+batch_size]
+        if vector_store is None:
+            vector_store = FAISS.from_documents(batch, embeddings)
+        else:
+            vector_store.add_documents(batch)
+        print(f"  - Processed batch {i//batch_size + 1}/{(len(chunks) + batch_size - 1)//batch_size}")
+
     vector_store_path = VECTOR_STORE_DIR / repo_name
     vector_store.save_local(str(vector_store_path))
     
@@ -97,7 +108,7 @@ def chat_with_repo(repo_name: str, question: str):
     
     print("Asking question with GPT-4.1...")
     # CHANGED: Use the correct gpt-4.1-turbo model name
-    llm = ChatOpenAI(model="gpt-4.1-turbo", temperature=0)
+    llm = ChatOpenAI(model="gpt-5-mini-2025-08-07", temperature=0)
     qa_chain = RetrievalQA.from_chain_type(
         llm=llm,
         chain_type="stuff",

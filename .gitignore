@@ -3,3 +3,5 @@
 cli_demo.db
 __pycache__/
 *.pyc
+repo_cache/
+vector_stores/
