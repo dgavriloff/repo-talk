@@ -106,8 +106,7 @@ def chat_with_repo(repo_name: str, question: str):
     embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
     vector_store = FAISS.load_local(str(vector_store_path), embeddings, allow_dangerous_deserialization=True)
     
-    print("Asking question with GPT-4.1...")
-    # CHANGED: Use the correct gpt-4.1-turbo model name
+    print("Asking question...")
     llm = ChatOpenAI(model="gpt-5-mini-2025-08-07", temperature=0)
     qa_chain = RetrievalQA.from_chain_type(
         llm=llm,
