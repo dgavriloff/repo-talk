@@ -1,1 +1,5 @@
 /venv
+.env
+cli_demo.db
+__pycache__/
+*.pyc
