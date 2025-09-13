@@ -12,8 +12,9 @@ from langchain_community.document_loaders import TextLoader
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.chains import RetrievalQA
+from langchain.prompts import PromptTemplate
 
-PROMPT_FILE = Path("ai_prompt.txt")
+PROMPT_TEMPLATE_FILE = Path("prompt_template.txt")
 
 # --- INITIAL SETUP ---
 load_dotenv()
@@ -23,8 +24,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler("llm_interactions.log"),
-        logging.StreamHandler()
+        logging.FileHandler("llm_interactions.log")
     ]
 )
 
@@ -119,25 +119,37 @@ def chat_with_repo(repo_name: str, question: str):
     embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
     vector_store = FAISS.load_local(str(vector_store_path), embeddings, allow_dangerous_deserialization=True)
     
+    if not PROMPT_TEMPLATE_FILE.exists():
+        logging.error(f"Error: Prompt template file '{PROMPT_TEMPLATE_FILE}' not found.")
+        return
+
+    with open(PROMPT_TEMPLATE_FILE, 'r') as f:
+        prompt_template_str = f.read()
+
+    prompt_template = PromptTemplate(
+        template=prompt_template_str,
+        input_variables=["context", "question"]
+    )
+
     logging.info("Asking question...")
     llm = ChatOpenAI(model="gpt-5-mini-2025-08-07", temperature=0)
     qa_chain = RetrievalQA.from_chain_type(
         llm=llm,
         chain_type="stuff",
-        retriever=vector_store.as_retriever()
+        retriever=vector_store.as_retriever(),
+        return_source_documents=True,
+        chain_type_kwargs={"prompt": prompt_template}
     )
     
-    if not PROMPT_FILE.exists():
-        logging.error(f"Error: Prompt file '{PROMPT_FILE}' not found.")
-        return
-
-    with open(PROMPT_FILE, 'r') as f:
-        ai_prompt = f.read()
-
-    full_question = f"{ai_prompt}\n\nUser Question: {question}"
-    logging.info(f"Full prompt sent to AI:\n{full_question}")
-    result = qa_chain.invoke(full_question)
+    logging.info(f"User Question: {question}")
+    result = qa_chain.invoke(question)
     
+    logging.info("\n--- Retrieved Context ---")
+    for doc in result['source_documents']:
+        logging.info(f"Source: {doc.metadata.get('source', 'Unknown')}")
+        logging.info(f"Content:\n{doc.page_content}\n")
+    logging.info("-------------------------\\n")
+
     logging.info("\n--- Answer ---")
     logging.info(result["result"])
     logging.info("--------------\n")
