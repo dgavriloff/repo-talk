@@ -5,3 +5,4 @@ __pycache__/
 *.pyc
 repo_cache/
 vector_stores/
+llm_interactions.log

@@ -4,6 +4,7 @@ import argparse
 import sqlite3
 from pathlib import Path
 from dotenv import load_dotenv
+import logging
 
 from git import Repo
 from langchain_community.vectorstores import FAISS
@@ -12,8 +13,20 @@ from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.chains import RetrievalQA
 
+PROMPT_FILE = Path("ai_prompt.txt")
+
 # --- INITIAL SETUP ---
 load_dotenv()
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("llm_interactions.log"),
+        logging.StreamHandler()
+    ]
+)
 
 if not os.getenv("OPENAI_API_KEY"):
     raise ValueError("OPENAI_API_KEY must be set in the .env file")
@@ -43,7 +56,7 @@ def init_db():
 def index_repository(repo_url: str):
     """Clones a repo, chunks code, creates embeddings, and saves them to disk."""
     repo_name = repo_url.split("/")[-1]
-    print(f"Starting indexing for '{repo_name}'...")
+    logging.info(f"Starting indexing for '{repo_name}'...")
 
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
@@ -55,10 +68,10 @@ def index_repository(repo_url: str):
     if local_path.exists():
         shutil.rmtree(local_path)
     
-    print(f"1/4: Cloning repository from {repo_url}...")
+    logging.info(f"1/4: Cloning repository from {repo_url}...")
     Repo.clone_from(repo_url, local_path, depth=1)
 
-    print("2/4: Loading documents...")
+    logging.info("2/4: Loading documents...")
     documents = []
     for pattern in ["*.py", "*.md", "*.js", "*.ts", "*.tsx"]:
         for file_path in local_path.rglob(pattern):
@@ -66,17 +79,17 @@ def index_repository(repo_url: str):
                 loader = TextLoader(file_path, encoding="utf-8")
                 documents.extend(loader.load())
             except Exception:
-                print(f"  - Skipping unreadable file: {file_path}")
+                logging.warning(f"  - Skipping unreadable file: {file_path}")
 
     if not documents:
-        print("No indexable documents found. Aborting.")
+        logging.info("No indexable documents found. Aborting.")
         return
 
-    print("3/4: Chunking documents...")
+    logging.info("3/4: Chunking documents...")
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=1500, chunk_overlap=150)
     chunks = text_splitter.split_documents(documents)
 
-    print("4/4: Creating and saving vector store via OpenAI API...")
+    logging.info("4/4: Creating and saving vector store via OpenAI API...")
     embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
     
     # Batch processing
@@ -88,25 +101,25 @@ def index_repository(repo_url: str):
             vector_store = FAISS.from_documents(batch, embeddings)
         else:
             vector_store.add_documents(batch)
-        print(f"  - Processed batch {i//batch_size + 1}/{(len(chunks) + batch_size - 1)//batch_size}")
+        logging.info(f"  - Processed batch {i//batch_size + 1}/{(len(chunks) + batch_size - 1)//batch_size}")
 
     vector_store_path = VECTOR_STORE_DIR / repo_name
     vector_store.save_local(str(vector_store_path))
     
-    print(f"\n✅ Indexing complete for '{repo_name}'.")
+    logging.info(f"\n✅ Indexing complete for '{repo_name}'.")
 
 def chat_with_repo(repo_name: str, question: str):
     """Loads a repo's vector store and asks a question."""
     vector_store_path = VECTOR_STORE_DIR / repo_name
     if not vector_store_path.exists():
-        print(f"Error: No index found for '{repo_name}'. Please index it first using the 'index' command.")
+        logging.error(f"Error: No index found for '{repo_name}'. Please index it first using the 'index' command.")
         return
 
-    print(f"Loading index for '{repo_name}'...")
+    logging.info(f"Loading index for '{repo_name}'...")
     embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
     vector_store = FAISS.load_local(str(vector_store_path), embeddings, allow_dangerous_deserialization=True)
     
-    print("Asking question...")
+    logging.info("Asking question...")
     llm = ChatOpenAI(model="gpt-5-mini-2025-08-07", temperature=0)
     qa_chain = RetrievalQA.from_chain_type(
         llm=llm,
@@ -114,11 +127,20 @@ def chat_with_repo(repo_name: str, question: str):
         retriever=vector_store.as_retriever()
     )
     
-    result = qa_chain.invoke(question)
+    if not PROMPT_FILE.exists():
+        logging.error(f"Error: Prompt file '{PROMPT_FILE}' not found.")
+        return
+
+    with open(PROMPT_FILE, 'r') as f:
+        ai_prompt = f.read()
+
+    full_question = f"{ai_prompt}\n\nUser Question: {question}"
+    logging.info(f"Full prompt sent to AI:\n{full_question}")
+    result = qa_chain.invoke(full_question)
     
-    print("\n--- Answer ---")
-    print(result["result"])
-    print("--------------\n")
+    logging.info("\n--- Answer ---")
+    logging.info(result["result"])
+    logging.info("--------------\n")
 
 # --- CLI COMMAND PARSER ---
 def main():
@@ -150,11 +172,11 @@ def main():
         repos = cursor.fetchall()
         conn.close()
         if not repos:
-            print("No repositories have been indexed yet.")
+            logging.info("No repositories have been indexed yet.")
         else:
-            print("Indexed Repositories:")
+            logging.info("Indexed Repositories:")
             for name, url in repos:
-                print(f"  - {name} ({url})")
+                logging.info(f"  - {name} ({url})")
 
 if __name__ == "__main__":
     init_db()
