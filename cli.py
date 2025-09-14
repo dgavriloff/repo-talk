@@ -11,10 +11,11 @@ from langchain_community.vectorstores import FAISS
 from langchain_community.document_loaders import TextLoader
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.chains import RetrievalQA
+from langchain.chains import RetrievalQA, LLMChain
 from langchain.prompts import PromptTemplate
 
 PROMPT_TEMPLATE_FILE = Path("prompt_template.txt")
+REWRITE_PROMPT_TEMPLATE_FILE = Path("rewrite_prompt_template.txt")
 
 # --- INITIAL SETUP ---
 load_dotenv()
@@ -109,50 +110,63 @@ def index_repository(repo_url: str):
     logging.info(f"\n✅ Indexing complete for '{repo_name}'.")
 
 def chat_with_repo(repo_name: str, question: str):
-    """Loads a repo's vector store and asks a question."""
+    """Uses a multi-step chain to answer a question about a repository."""
+    # --- 0. Load Vector Store and LLM ---
     vector_store_path = VECTOR_STORE_DIR / repo_name
     if not vector_store_path.exists():
-        logging.error(f"Error: No index found for '{repo_name}'. Please index it first using the 'index' command.")
+        logging.error(f"Error: No index found for '{repo_name}'. Please index it first.")
         return
 
     logging.info(f"Loading index for '{repo_name}'...")
     embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
     vector_store = FAISS.load_local(str(vector_store_path), embeddings, allow_dangerous_deserialization=True)
+    llm = ChatOpenAI(model="gpt-5-mini-2025-08-07", temperature=0)
+
+    # --- 1. Rewrite the User's Question for Better Retrieval ---
+    if not REWRITE_PROMPT_TEMPLATE_FILE.exists():
+        logging.error(f"Error: Rewrite prompt template file '{REWRITE_PROMPT_TEMPLATE_FILE}' not found.")
+        return
+    with open(REWRITE_PROMPT_TEMPLATE_FILE, 'r') as f:
+        rewrite_template_str = f.read()
     
+    rewrite_prompt = PromptTemplate.from_template(rewrite_template_str)
+    rewrite_chain = LLMChain(llm=llm, prompt=rewrite_prompt)
+    
+    logging.info(f"Original user question: {question}")
+    rewritten_question = rewrite_chain.invoke({"question": question})["text"]
+    logging.info(f"Rewritten question for vector search: {rewritten_question}")
+
+    # --- 2. Retrieve Context from the Vector Database ---
+    retriever = vector_store.as_retriever()
+    retrieved_docs = retriever.get_relevant_documents(rewritten_question)
+    
+    logging.info("\n--- Retrieved Context ---")
+    for doc in retrieved_docs:
+        logging.info(f"Source: {doc.metadata.get('source', 'Unknown')}")
+        logging.info(f"Content:\n{doc.page_content}\n")
+    logging.info("-------------------------\n")
+
+    # --- 3. Synthesize the Final Answer ---
     if not PROMPT_TEMPLATE_FILE.exists():
         logging.error(f"Error: Prompt template file '{PROMPT_TEMPLATE_FILE}' not found.")
         return
-
     with open(PROMPT_TEMPLATE_FILE, 'r') as f:
-        prompt_template_str = f.read()
+        answer_template_str = f.read()
 
-    prompt_template = PromptTemplate(
-        template=prompt_template_str,
-        input_variables=["context", "question"]
-    )
+    answer_prompt = PromptTemplate.from_template(answer_template_str)
+    answer_chain = LLMChain(llm=llm, prompt=answer_prompt)
 
-    logging.info("Asking question...")
-    llm = ChatOpenAI(model="gpt-5-mini-2025-08-07", temperature=0)
-    qa_chain = RetrievalQA.from_chain_type(
-        llm=llm,
-        chain_type="stuff",
-        retriever=vector_store.as_retriever(),
-        return_source_documents=True,
-        chain_type_kwargs={"prompt": prompt_template}
-    )
+    context_str = "\n\n".join([doc.page_content for doc in retrieved_docs])
     
-    logging.info(f"User Question: {question}")
-    result = qa_chain.invoke(question)
-    
-    logging.info("\n--- Retrieved Context ---")
-    for doc in result['source_documents']:
-        logging.info(f"Source: {doc.metadata.get('source', 'Unknown')}")
-        logging.info(f"Content:\n{doc.page_content}\n")
-    logging.info("-------------------------\\n")
+    final_answer = answer_chain.invoke({
+        "context": context_str,
+        "question": question # Use the original question for the final answer
+    })["text"]
 
-    logging.info("\n--- Answer ---")
-    logging.info(result["result"])
-    logging.info("--------------\n")
+    logging.info("\n--- Final Answer ---")
+    logging.info(final_answer)
+    logging.info("--------------------\n")
+
 
 # --- CLI COMMAND PARSER ---
 def main():
